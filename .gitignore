@@ -1,0 +1,15 @@
+# Compiled binary
+/journal-mcp
+
+# Go build / test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Editor / OS cruft
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
