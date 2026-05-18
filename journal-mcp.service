@@ -2,10 +2,15 @@
 Description=Local-only MCP server that appends to today's Obsidian daily note
 Documentation=file:%h/Projects/journal-mcp/README.md
 After=default.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/journal-mcp -addr 127.0.0.1:17310
+# -docker-network binds to the host-side gateway of overmind_default so the
+# devcontainer can reach us at $(ip route | awk '/default/ {print $3}'):17310.
+# Until docker is up and that network exists, this exits non-zero and is
+# restarted by systemd. RestartSec=2s + no rate-limit so we retry forever.
+ExecStart=%h/.local/bin/journal-mcp -addr 127.0.0.1:17310 -docker-network overmind_default
 Restart=on-failure
 RestartSec=2s
 

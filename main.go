@@ -5,12 +5,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,10 +25,12 @@ import (
 )
 
 var (
-	addr        = flag.String("addr", "127.0.0.1:17310", "loopback address to listen on (Streamable HTTP)")
-	vaultDir    = flag.String("vault-daily-dir", "", "directory containing daily notes; default $HOME/Documents/vault/Journal/Daily")
-	section     = flag.String("section", "Overmind Notes", "H2 section heading to append entries under")
-	noTimestamp = flag.Bool("no-timestamp", false, "do not prefix each bullet with the current HH:MM")
+	addr          = flag.String("addr", "127.0.0.1:17310", "loopback address to listen on (Streamable HTTP)")
+	dockerNetwork = flag.String("docker-network", "", "if set, bind to the host-side gateway IP of this docker bridge network instead of -addr's host; the listener is then reachable from containers attached to that network but not from the LAN. Reuses the port from -addr.")
+	dockerSocket  = flag.String("docker-socket", "/var/run/docker.sock", "path to the docker engine socket; used only with -docker-network")
+	vaultDir      = flag.String("vault-daily-dir", "", "directory containing daily notes; default $HOME/Documents/vault/Journal/Daily")
+	section       = flag.String("section", "Overmind Notes", "H2 section heading to append entries under")
+	noTimestamp   = flag.Bool("no-timestamp", false, "do not prefix each bullet with the current HH:MM")
 )
 
 // writeMu serialises edits to the daily note so concurrent tool calls cannot
@@ -72,9 +77,18 @@ func main() {
 		return server
 	}, nil)
 
-	// Refuse to bind anything that isn't loopback. Belt-and-braces in case the
-	// flag gets overridden by mistake.
-	if err := assertLoopback(*addr); err != nil {
+	// Resolve the bind address. Default path is loopback-only. The single
+	// escape hatch is -docker-network, which binds to the host-side gateway
+	// of a named docker bridge — reachable from containers on that bridge,
+	// not from anything that isn't already inside that overlay.
+	if *dockerNetwork != "" {
+		resolved, err := resolveDockerNetworkAddr(*dockerSocket, *dockerNetwork, *addr)
+		if err != nil {
+			log.Fatalf("resolve -docker-network %q: %v", *dockerNetwork, err)
+		}
+		log.Printf("binding to gateway of docker network %q: %s", *dockerNetwork, resolved)
+		*addr = resolved
+	} else if err := assertLoopback(*addr); err != nil {
 		log.Fatalf("refusing to listen on non-loopback address: %v", err)
 	}
 
@@ -265,6 +279,81 @@ func updateMarkdown(content, section string, bullets []string, now time.Time) st
 		out += "\n"
 	}
 	return out
+}
+
+// resolveDockerNetworkAddr returns "<gateway-ip>:<port>" where the IP is the
+// host-side gateway of the named docker bridge network and the port is the
+// port from fallbackAddr. It refuses to return a non-private, non-loopback
+// address so a misconfigured docker network can't trick the server into
+// binding to a publicly-reachable IP.
+func resolveDockerNetworkAddr(socketPath, network, fallbackAddr string) (string, error) {
+	_, port, err := net.SplitHostPort(fallbackAddr)
+	if err != nil {
+		return "", fmt.Errorf("parse port from -addr %q: %w", fallbackAddr, err)
+	}
+	ip, err := dockerNetworkGateway(socketPath, network)
+	if err != nil {
+		return "", err
+	}
+	if !ip.IsPrivate() && !ip.IsLoopback() {
+		return "", fmt.Errorf("gateway %s is neither RFC1918 nor loopback; refusing to bind", ip)
+	}
+	return net.JoinHostPort(ip.String(), port), nil
+}
+
+// dockerNetworkGateway asks the docker daemon (over its unix socket) for the
+// IPAM gateway of the named network. No dependency on the `docker` CLI.
+func dockerNetworkGateway(socketPath, network string) (net.IP, error) {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+			},
+		},
+	}
+	// The host portion of the URL is ignored by the unix-socket dialer above;
+	// docker just wants the path.
+	req, err := http.NewRequest(http.MethodGet, "http://docker/networks/"+url.PathEscape(network), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("query docker daemon at %s: %w", socketPath, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("docker GET /networks/%s: %s: %s", network, resp.Status, strings.TrimSpace(string(body)))
+	}
+	return parseDockerNetworkGateway(body)
+}
+
+// parseDockerNetworkGateway pulls the first non-empty IPAM gateway out of a
+// docker network-inspect response body. Split out for testability.
+func parseDockerNetworkGateway(body []byte) (net.IP, error) {
+	var doc struct {
+		IPAM struct {
+			Config []struct {
+				Gateway string `json:"Gateway"`
+			} `json:"Config"`
+		} `json:"IPAM"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Errorf("parse docker network JSON: %w", err)
+	}
+	for _, c := range doc.IPAM.Config {
+		if c.Gateway == "" {
+			continue
+		}
+		ip := net.ParseIP(c.Gateway)
+		if ip == nil {
+			return nil, fmt.Errorf("docker returned malformed gateway %q", c.Gateway)
+		}
+		return ip, nil
+	}
+	return nil, errors.New("docker network has no IPAM gateway configured")
 }
 
 // assertLoopback ensures the listen address resolves to 127.0.0.0/8 or ::1.

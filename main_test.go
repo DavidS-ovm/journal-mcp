@@ -1,6 +1,10 @@
 package main
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -100,4 +104,110 @@ func TestAssertLoopback(t *testing.T) {
 			t.Errorf("assertLoopback(%q): err=%v wantOK=%v", addr, err, wantOK)
 		}
 	}
+}
+
+func TestParseDockerNetworkGateway(t *testing.T) {
+	t.Run("ok", func(t *testing.T) {
+		body := []byte(`{"IPAM":{"Config":[{"Subnet":"172.20.0.0/16","Gateway":"172.20.0.1"}]}}`)
+		ip, err := parseDockerNetworkGateway(body)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if ip.String() != "172.20.0.1" {
+			t.Errorf("got %s, want 172.20.0.1", ip)
+		}
+	})
+
+	t.Run("skips empty gateway in first config", func(t *testing.T) {
+		body := []byte(`{"IPAM":{"Config":[{"Subnet":"fd00::/64"},{"Gateway":"172.20.0.1"}]}}`)
+		ip, err := parseDockerNetworkGateway(body)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if ip.String() != "172.20.0.1" {
+			t.Errorf("got %s, want 172.20.0.1", ip)
+		}
+	})
+
+	t.Run("no gateway", func(t *testing.T) {
+		body := []byte(`{"IPAM":{"Config":[]}}`)
+		if _, err := parseDockerNetworkGateway(body); err == nil {
+			t.Fatal("expected error for missing gateway")
+		}
+	})
+
+	t.Run("malformed ip", func(t *testing.T) {
+		body := []byte(`{"IPAM":{"Config":[{"Gateway":"nope"}]}}`)
+		if _, err := parseDockerNetworkGateway(body); err == nil {
+			t.Fatal("expected error for malformed ip")
+		}
+	})
+
+	t.Run("bad json", func(t *testing.T) {
+		if _, err := parseDockerNetworkGateway([]byte("{")); err == nil {
+			t.Fatal("expected error for malformed json")
+		}
+	})
+}
+
+// fakeDockerDaemon spins up a tiny HTTP server on a unix socket inside
+// t.TempDir() that mimics docker's GET /networks/<name>. Returns the socket
+// path; the server is cleaned up automatically on test end.
+func fakeDockerDaemon(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	sockPath := filepath.Join(t.TempDir(), "docker.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	srv := &httptest.Server{
+		Listener: ln,
+		Config:   &http.Server{Handler: handler, ReadHeaderTimeout: time.Second},
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return sockPath
+}
+
+func TestResolveDockerNetworkAddr(t *testing.T) {
+	t.Run("private gateway", func(t *testing.T) {
+		sock := fakeDockerDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/networks/overmind_default" {
+				t.Errorf("unexpected path %s", r.URL.Path)
+			}
+			_, _ = w.Write([]byte(`{"IPAM":{"Config":[{"Gateway":"172.18.0.1"}]}}`))
+		}))
+		got, err := resolveDockerNetworkAddr(sock, "overmind_default", "127.0.0.1:17310")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if got != "172.18.0.1:17310" {
+			t.Errorf("got %q, want 172.18.0.1:17310", got)
+		}
+	})
+
+	t.Run("refuses public gateway", func(t *testing.T) {
+		sock := fakeDockerDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"IPAM":{"Config":[{"Gateway":"8.8.8.8"}]}}`))
+		}))
+		if _, err := resolveDockerNetworkAddr(sock, "weird", "127.0.0.1:17310"); err == nil {
+			t.Fatal("expected refusal for public gateway")
+		}
+	})
+
+	t.Run("404 from docker", func(t *testing.T) {
+		sock := fakeDockerDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, `{"message":"network missing not found"}`, http.StatusNotFound)
+		}))
+		_, err := resolveDockerNetworkAddr(sock, "missing", "127.0.0.1:17310")
+		if err == nil || !strings.Contains(err.Error(), "404") {
+			t.Fatalf("expected 404 in error, got %v", err)
+		}
+	})
+
+	t.Run("bad port in fallback addr", func(t *testing.T) {
+		if _, err := resolveDockerNetworkAddr("/dev/null", "x", "no-port-here"); err == nil {
+			t.Fatal("expected error parsing port")
+		}
+	})
 }
