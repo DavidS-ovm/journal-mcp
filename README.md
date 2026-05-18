@@ -83,6 +83,44 @@ The default unit uses `-docker-network overmind_default`. If your compose
 project uses a different network name, edit the unit (or override with
 `systemctl --user edit journal-mcp.service`).
 
+### Pointing Cursor (inside the devcontainer) at the server
+
+`host.docker.internal` does **not** resolve in stock Linux Docker containers —
+it's only injected when the container is started with
+`--add-host=host.docker.internal:host-gateway`. If your team's devcontainer
+doesn't set that (and you don't want to fork it), point Cursor at the bridge
+gateway IP directly. Inside the devcontainer, edit `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "journal": {
+      "url": "http://172.18.0.1:17310/"
+    }
+  }
+}
+```
+
+Substitute whichever IP the `HOST_IP=…` snippet above prints — that's the
+host-side gateway of the bridge journal-mcp is now listening on. It's stable
+across `docker compose down/up` because Docker remembers subnet assignments,
+so you only need to revisit this if the compose network is destroyed and
+re-created with a different subnet.
+
+If you'd rather not hardcode it, drop a refresh helper in the devcontainer
+that rewrites the URL on demand:
+
+```bash
+GW=$(ip route | awk '/default/ {print $3}')
+jq --arg url "http://${GW}:17310/" \
+   '.mcpServers.journal = {url: $url}' \
+   ~/.cursor/mcp.json > ~/.cursor/mcp.json.tmp \
+   && mv ~/.cursor/mcp.json.tmp ~/.cursor/mcp.json
+```
+
+Run it whenever the compose network gets recreated, then reload the MCP
+server in Cursor's Settings → MCP.
+
 Safety notes:
 
 - The resolved gateway must be RFC1918 (or loopback). A docker network with
