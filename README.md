@@ -17,23 +17,21 @@ Obsidian daily note (default `~/Documents/vault/Journal/Daily/YYYY-MM-DD.md`).
 - Concurrent writes are serialised in-process and committed atomically via
   `rename(2)` to keep Obsidian's file watcher happy.
 
-## Install
+## Install / refresh
+
+`./deploy.sh` builds from the current checkout, installs the binary into
+`~/.local/bin/` and the unit into `~/.config/systemd/user/`, reloads user
+systemd, and either enables-and-starts or restarts the service depending on
+whether it's already enabled. Re-run after every code change.
 
 ```bash
-# 1. Build and stage the binary.
 cd ~/Projects/journal-mcp
-go build -o ~/.local/bin/journal-mcp .
+./deploy.sh
+```
 
-# 2. Drop the unit into the user systemd dir.
-mkdir -p ~/.config/systemd/user
-cp journal-mcp.service ~/.config/systemd/user/
+Sanity-check:
 
-# 3. Enable + start.
-systemctl --user daemon-reload
-systemctl --user enable --now journal-mcp.service
-
-# 4. Sanity check.
-systemctl --user status journal-mcp.service
+```bash
 journalctl --user -u journal-mcp.service -f
 curl -i http://127.0.0.1:17310/   # MCP endpoint; should respond, not refuse.
 ```
