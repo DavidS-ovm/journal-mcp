@@ -77,30 +77,47 @@ func main() {
 		return server
 	}, nil)
 
-	// Resolve the bind address. Default path is loopback-only. The single
-	// escape hatch is -docker-network, which binds to the host-side gateway
-	// of a named docker bridge — reachable from containers on that bridge,
-	// not from anything that isn't already inside that overlay.
+	// Always bind loopback so host-side clients keep working. -docker-network
+	// is additive: it tacks on a second listener bound to the host-side
+	// gateway of a named docker bridge so devcontainers on that bridge can
+	// reach us at the same port without giving them host network access.
+	if err := assertLoopback(*addr); err != nil {
+		log.Fatalf("refusing to listen on non-loopback address: %v", err)
+	}
+	bindAddrs := []string{*addr}
 	if *dockerNetwork != "" {
-		resolved, err := resolveDockerNetworkAddr(*dockerSocket, *dockerNetwork, *addr)
+		extra, err := resolveDockerNetworkAddr(*dockerSocket, *dockerNetwork, *addr)
 		if err != nil {
 			log.Fatalf("resolve -docker-network %q: %v", *dockerNetwork, err)
 		}
-		log.Printf("binding to gateway of docker network %q: %s", *dockerNetwork, resolved)
-		*addr = resolved
-	} else if err := assertLoopback(*addr); err != nil {
-		log.Fatalf("refusing to listen on non-loopback address: %v", err)
+		bindAddrs = append(bindAddrs, extra)
 	}
 
-	log.Printf("journal-mcp listening on http://%s  vault=%s  section=%q", *addr, *vaultDir, *section)
 	srv := &http.Server{
-		Addr:              *addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("listen: %v", err)
+	// Bind everything up front so a failure on the second listener doesn't
+	// leave the first one half-serving.
+	listeners := make([]net.Listener, 0, len(bindAddrs))
+	for _, a := range bindAddrs {
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			log.Fatalf("listen %s: %v", a, err)
+		}
+		listeners = append(listeners, ln)
 	}
+
+	log.Printf("journal-mcp listening on %s  vault=%s  section=%q", strings.Join(bindAddrs, ", "), *vaultDir, *section)
+	for _, ln := range listeners {
+		ln := ln
+		go func() {
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("serve %s: %v", ln.Addr(), err)
+			}
+		}()
+	}
+	select {} // wait forever; systemd will SIGTERM us when it wants us gone.
 }
 
 func handleWriteJournalEntry(ctx context.Context, _ *mcp.CallToolRequest, args *WriteJournalEntryArgs) (*mcp.CallToolResult, *WriteJournalEntryResult, error) {
