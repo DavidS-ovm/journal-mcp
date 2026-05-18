@@ -17,7 +17,7 @@ Obsidian daily note (default `~/Documents/vault/Journal/Daily/YYYY-MM-DD.md`).
 
 ```bash
 # 1. Build and stage the binary.
-cd ~/journal-mcp
+cd ~/Projects/journal-mcp
 go build -o ~/.local/bin/journal-mcp .
 
 # 2. Drop the unit into the user systemd dir.

@@ -1,6 +1,6 @@
 [Unit]
 Description=Local-only MCP server that appends to today's Obsidian daily note
-Documentation=file:%h/journal-mcp/README.md
+Documentation=file:%h/Projects/journal-mcp/README.md
 After=default.target
 
 [Service]
