@@ -38,8 +38,13 @@ var (
 var writeMu sync.Mutex
 
 // WriteJournalEntryArgs is the input schema for the write_journal_entry tool.
+//
+// The jsonschema description spells out the exact calling shape because
+// agents (notably Claude Opus) like to wrap each bullet in an object such as
+// {"content": "..."} or {"text": "..."}; that fails schema validation and
+// burns a retry. Keep the example concrete.
 type WriteJournalEntryArgs struct {
-	Entries []string `json:"entries" jsonschema:"one or more bullet entries to append; each becomes its own list item"`
+	Entries []string `json:"entries" jsonschema:"array of plain strings; each string becomes one bullet. Do NOT wrap entries in objects (no {\"content\":...}, no {\"text\":...}, no {\"entry\":...}). Correct shape: {\"entries\":[\"fixed bug X\",\"shipped feature Y\"]}"`
 }
 
 // WriteJournalEntryResult tells the agent exactly what was written and where.
@@ -70,7 +75,7 @@ func main() {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "write_journal_entry",
-		Description: "Append one or more bullet items to the '" + *section + "' section of today's Obsidian daily note. Creates the file and the section if either is missing. Use one bullet per discrete piece of work.",
+		Description: "Append one or more bullet items to the '" + *section + "' section of today's Obsidian daily note. Creates the file and the section if either is missing. Use one bullet per discrete piece of work. Call shape: {\"entries\":[\"first bullet\",\"second bullet\"]} — entries is an array of plain strings, never objects.",
 	}, handleWriteJournalEntry)
 
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
